@@ -1,0 +1,106 @@
+name: Check Docker Image Build
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  REPOSITORY: ${{ secrets.DOCKER_HUB_ORGS || github.repository_owner }}/fluentd-kubernetes-daemonset
+jobs:
+  define-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      components: >
+        ${{ steps.all-components.outputs.json }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: all-components
+        name: Collect components handled by `make src-all`
+        run: |
+          set -x
+          components="$(make echo-all-components)"
+          echo "json=$(printf '%s' "${components}" | jq --raw-input --compact-output 'split(" ")')" >> "$GITHUB_OUTPUT"
+  amd64:
+    needs: define-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.define-matrix.outputs.components) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          platforms: linux/amd64
+      - name: Setup tags
+        run: |
+          set -x
+          component=${{ matrix.component }}
+          branch=$(make echo-all-images | cut -d '/' -f1)
+          echo "CONTEXT=docker-image/${branch}/${component}" >> ${GITHUB_ENV}
+          for target in $(make echo-all-images); do
+            case $target in
+              *$component-amd64*)
+                tags=$(echo $target | cut -d':' -f2-)
+                tag1=$(echo $tags | cut -d',' -f1)
+                tag2=$(echo $tags | cut -d',' -f2)
+                echo "AMD64TAGS=${{ env.REPOSITORY }}:${tag1},${{ env.REPOSITORY }}:${tag2}" >> ${GITHUB_ENV}
+                ;;
+            esac
+          done
+      - name: Build for amd64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ env.CONTEXT }}
+          provenance: false
+          push: false
+          platforms: linux/amd64
+          tags: ${{ env.AMD64TAGS }}
+          # dare to use old mediatype (application/vnd.docker.distribution.manifest.v2+json)
+          outputs: oci-mediatypes=false
+  arm64:
+    needs: define-matrix
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.define-matrix.outputs.components) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          platforms: linux/arm64
+      - name: Setup tags
+        run: |
+          set -x
+          component=${{ matrix.component }}
+          branch=$(make echo-all-images | cut -d '/' -f1)
+          echo "CONTEXT=docker-image/${branch}/arm64/${component}" >> ${GITHUB_ENV}
+          for target in $(make echo-all-images); do
+            case $target in
+              *$component-arm64*)
+                tags=$(echo $target | cut -d':' -f2-)
+                tag1=$(echo $tags | cut -d',' -f1)
+                tag2=$(echo $tags | cut -d',' -f2)
+                echo "ARM64TAGS=${{ env.REPOSITORY }}:${tag1},${{ env.REPOSITORY }}:${tag2}" >> ${GITHUB_ENV}
+                ;;
+            esac
+          done
+      - name: Build for arm64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ env.CONTEXT }}
+          provenance: false
+          push: false
+          platforms: linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: ${{ env.ARM64TAGS }}
+          # dare to use old mediatype (application/vnd.docker.distribution.manifest.v2+json)
+          outputs: oci-mediatypes=false

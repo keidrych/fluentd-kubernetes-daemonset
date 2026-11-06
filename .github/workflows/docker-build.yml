@@ -1,0 +1,256 @@
+name: Publish Docker Image
+
+on:
+  push:
+    tags:
+      - v1.*
+
+permissions:
+  contents: read
+
+env:
+  REPOSITORY: ${{ secrets.DOCKER_HUB_ORGS }}/fluentd-kubernetes-daemonset
+jobs:
+  define-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      components: >
+        ${{ steps.arrange-components.outputs.for_all == 'true' && steps.all-components.outputs.json
+        || format('["{0}"]', steps.arrange-components.outputs.component) }}
+      master_version: ${{ steps.master.outputs.version }}
+      master_components: ${{ steps.master.outputs.components }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: all-components
+        name: Collect components handled by `make src-all`
+        run: |
+          set -x
+          components="$(make echo-all-components)"
+          echo "list=${components}" >> "$GITHUB_OUTPUT"
+          echo "json=$(printf '%s' "${components}" | jq --raw-input --compact-output 'split(" ")')" >> "$GITHUB_OUTPUT"
+      - id: arrange-components
+        env:
+          ALL_COMPONENTS: ${{ steps.all-components.outputs.list }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          echo "for_all=true" >> "$GITHUB_OUTPUT"
+          for component in ${ALL_COMPONENTS}; do
+            if [[ ${REF_NAME} == *"$component"* ]]; then
+              echo "for_all=false" >> "$GITHUB_OUTPUT"
+              echo "component=$component" >> "$GITHUB_OUTPUT"
+              break
+            fi
+          done
+      - id: master
+        name: Collect version and components on master
+        # Fetch them here once, so that a failure stops the workflow before
+        # any image is pushed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -H "Accept: application/vnd.github.raw" \
+            "repos/${GITHUB_REPOSITORY}/contents/Makefile?ref=master" > "${RUNNER_TEMP}/Makefile.master"
+          version=$(make --silent --file="${RUNNER_TEMP}/Makefile.master" echo-all-images | cut -d '/' -f1)
+          components=$(make --silent --file="${RUNNER_TEMP}/Makefile.master" echo-all-components)
+          if [ -z "${version}" ] || [ -z "${components}" ]; then
+            echo "Failed to get version or components from Makefile on master"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "components=${components}" >> "$GITHUB_OUTPUT"
+  amd64:
+    needs: define-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.define-matrix.outputs.components) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          platforms: linux/amd64
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+      - name: Setup tags
+        run: |
+          set -x
+          component=${{ matrix.component }}
+          branch=$(make echo-all-images | cut -d '/' -f1)
+          echo "CONTEXT=docker-image/${branch}/${component}" >> ${GITHUB_ENV}
+          for target in $(make echo-all-images); do
+            case $target in
+              *$component-amd64*)
+                tags=$(echo $target | cut -d':' -f2-)
+                tag1=$(echo $tags | cut -d',' -f1)
+                tag2=$(echo $tags | cut -d',' -f2)
+                echo "AMD64TAGS=${{ env.REPOSITORY }}:${tag1},${{ env.REPOSITORY }}:${tag2}" >> ${GITHUB_ENV}
+                ;;
+            esac
+          done
+      - name: Build and push for amd64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ env.CONTEXT }}
+          provenance: false
+          push: true
+          platforms: linux/amd64
+          tags: ${{ env.AMD64TAGS }}
+          # dare to use old mediatype (application/vnd.docker.distribution.manifest.v2+json)
+          outputs: oci-mediatypes=false
+  arm64:
+    needs: define-matrix
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.define-matrix.outputs.components) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          platforms: linux/arm64
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+      - name: Setup tags
+        run: |
+          set -x
+          component=${{ matrix.component }}
+          branch=$(make echo-all-images | cut -d '/' -f1)
+          echo "CONTEXT=docker-image/${branch}/arm64/${component}" >> ${GITHUB_ENV}
+          for target in $(make echo-all-images); do
+            case $target in
+              *$component-arm64*)
+                tags=$(echo $target | cut -d':' -f2-)
+                tag1=$(echo $tags | cut -d',' -f1)
+                tag2=$(echo $tags | cut -d',' -f2)
+                echo "ARM64TAGS=${{ env.REPOSITORY }}:${tag1},${{ env.REPOSITORY }}:${tag2}" >> ${GITHUB_ENV}
+                ;;
+            esac
+          done
+      - name: Build and push for arm64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ env.CONTEXT }}
+          provenance: false
+          push: true
+          platforms: linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: ${{ env.ARM64TAGS }}
+          # dare to use old mediatype (application/vnd.docker.distribution.manifest.v2+json)
+          outputs: oci-mediatypes=false
+  manifest:
+    needs: [define-matrix, amd64, arm64]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.define-matrix.outputs.components) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+      - name: Create manifest
+        shell: bash
+        env:
+          MASTER_VERSION: ${{ needs.define-matrix.outputs.master_version }}
+          MASTER_COMPONENTS: ${{ needs.define-matrix.outputs.master_components }}
+        run: |
+          component=${{ matrix.component }}
+          version=$(make --silent echo-all-images | cut -d '/' -f1)
+          if [ -z "${version}" ]; then
+            echo "Failed to get version from Makefile"
+            exit 1
+          fi
+          if [ "${version}" = "${MASTER_VERSION}" ]; then
+            UPDATE_V1_TAG=true
+          elif [[ " ${MASTER_COMPONENTS} " != *" ${component} "* ]]; then
+            # master dropped this component (e.g. debian-elasticsearch7), so no one
+            # but this maintenance branch can update its v1-* tags
+            UPDATE_V1_TAG=true
+          else
+            UPDATE_V1_TAG=false
+          fi
+          for target in $(make echo-all-images); do
+            case $target in
+              *$component-amd64*)
+                tags=$(echo $target | cut -d':' -f2-)
+                tag1=$(echo $tags | cut -d',' -f1)
+                tag2=$(echo $tags | cut -d',' -f2)
+                MULTIARCH_AMD64_TAG=${tag1/amd64-/}
+                MULTIARCH_AMD64_SHORT_TAG=${tag2/amd64-/}
+                AMD64TAG=${tag1}
+                SHORT_AMD64TAG=${tag2}
+                ;;
+              *$component-arm64*)
+                tags=$(echo $target | cut -d':' -f2-)
+                tag1=$(echo $tags | cut -d',' -f1)
+                tag2=$(echo $tags | cut -d',' -f2)
+                MULTIARCH_ARM64_TAG=${tag1/arm64-/}
+                MULTIARCH_ARM64_SHORT_TAG=${tag2/arm64-/}
+                ARM64TAG=${tag1}
+                SHORT_ARM64TAG=${tag2}
+                ;;
+            esac
+          done
+          # Release from a maintenance branch must not move v1-* tags back to an old version
+          if [ "${UPDATE_V1_TAG}" = true ]; then
+            # v1-debian-(component)
+            docker buildx imagetools create -t ${{ env.REPOSITORY }}:v1-${component} ${{ env.REPOSITORY }}:${AMD64TAG}
+            # v1-debian-(component)-arm64
+            docker buildx imagetools create -t ${{ env.REPOSITORY }}:v1-${component}-arm64 ${{ env.REPOSITORY }}:${ARM64TAG}
+          else
+            echo "Skip v1-${component} tags because master (${MASTER_VERSION}) also has ${component}"
+          fi
+          # v1.xx.x-debian-(component)-xxx
+          if [ ${MULTIARCH_AMD64_TAG} != ${MULTIARCH_ARM64_TAG} ]; then
+            echo "Multiarch tag (v1.xx.x-debian-(component)-xxx) must be same for amd64 and arm64: ${MULTIARCH_AMD64_TAG} !=  ${MULTIARCH_ARM64_TAG}"
+          else
+            docker buildx imagetools create -t ${{ env.REPOSITORY }}:${MULTIARCH_AMD64_TAG} \
+              ${{ env.REPOSITORY }}:${AMD64TAG} \
+              ${{ env.REPOSITORY }}:${ARM64TAG}
+          fi
+          # v1.xx-debian-(component)-xxx
+          if [ ${MULTIARCH_AMD64_SHORT_TAG} != ${MULTIARCH_ARM64_SHORT_TAG} ]; then
+            echo "Multiarch tag (v1.xx-debian-(component)-xxx) must be same for amd64 and arm64: ${MULTIARCH_AMD64_SHORT_TAG} !=  ${MULTIARCH_ARM64_SHORT_TAG}"
+          else
+            docker buildx imagetools create -t ${{ env.REPOSITORY }}:${MULTIARCH_AMD64_SHORT_TAG} \
+              ${{ env.REPOSITORY }}:${SHORT_AMD64TAG} \
+              ${{ env.REPOSITORY }}:${SHORT_ARM64TAG}
+          fi
+          echo "MULTIARCH_AMD64_TAG=${MULTIARCH_AMD64_TAG}" >> ${GITHUB_ENV}
+          echo "MULTIARCH_AMD64_SHORT_TAG=${MULTIARCH_AMD64_SHORT_TAG}" >> ${GITHUB_ENV}
+          echo "AMD64TAG=${AMD64TAG}" >> ${GITHUB_ENV}
+          echo "SHORT_AMD64TAG=${SHORT_ARM64TAG}" >> ${GITHUB_ENV}
+          echo "MULTIARCH_ARM64_TAG=${MULTIARCH_ARM64_TAG}" >> ${GITHUB_ENV}
+          echo "MULTIARCH_ARM64_SHORT_TAG=${MULTIARCH_ARM64_SHORT_TAG}" >> ${GITHUB_ENV}
+          echo "ARM64TAG=${ARM64TAG}" >> ${GITHUB_ENV}
+          echo "SHORT_ARM64TAG=${SHORT_ARM64TAG}" >> ${GITHUB_ENV}
+      - name: Inspect manifest ${{ env.AMD64TAG }}
+        run: docker manifest inspect ${{ env.REPOSITORY }}:${{ env.AMD64TAG }}
+      - name: Inspect manifest ${{ env.ARM64TAG }}
+        run: docker manifest inspect ${{ env.REPOSITORY }}:${{ env.ARM64TAG }}
+      - name: Inspect manifest ${{ env.MULTIARCH_AMD64_TAG }}
+        run: docker manifest inspect ${{ env.REPOSITORY }}:${{ env.MULTIARCH_AMD64_TAG }}
+      - name: Inspect manifest ${{ env.MULTIARCH_AMD64_SHORT_TAG }}
+        run: docker manifest inspect ${{ env.REPOSITORY }}:${{ env.MULTIARCH_AMD64_SHORT_TAG }}
+      - name: Inspect ${{ env.AMD64TAG }} with buildx
+        run: docker buildx imagetools inspect ${{ env.REPOSITORY }}:${{ env.AMD64TAG }}
+      - name: Inspect ${{ env.ARM64TAG }} with buildx
+        run: docker buildx imagetools inspect ${{ env.REPOSITORY }}:${{ env.ARM64TAG }}
+      - name: Inspect ${{ env.MULTIARCH_AMD64_TAG }} with buildx
+        run: docker buildx imagetools inspect ${{ env.REPOSITORY }}:${{ env.MULTIARCH_AMD64_TAG }}
+      - name: Inspect ${{ env.MULTIARCH_AMD64_SHORT_TAG }} with buildx
+        run: docker buildx imagetools inspect ${{ env.REPOSITORY }}:${{ env.MULTIARCH_AMD64_SHORT_TAG }}

@@ -4,6 +4,9 @@
 
 | Version   | Supported          |
 |-----------|--------------------|
+| 1.19.x    | :white_check_mark: |
+| 1.18.x    | :x:                |
+| 1.17.x    | :x:                |
 | 1.16.x    | :white_check_mark: |
 | <= 1.15.x | :x:                |
 
@@ -11,7 +14,7 @@
 
 If you find a vulnerability of **fluentd-daemonset-SOMETHING** with the default configuration, report it from the following page:
 
-* https://github.com/fluent/fluentd/security/advisories
+* https://github.com/fluent/fluentd-kubernetes-daemonset/security/advisories
 
 > [!IMPORTANT]
 > fluentd-kubernetes-daemonset images are downstream of [fluent/fluentd](https://hub.docker.com/r/fluent/fluentd) container.
